@@ -14,11 +14,16 @@
 #define ENGINE_STROKE_DEGREES   720     // 4-stroke = 720°
 #define CRANK_DEGREES_PER_REV   360
 
-// Firing order (1-3-4-2 is common for inline 4)
-#define FIRING_ORDER_1          0       // Cylinder 1 fires at 0°
-#define FIRING_ORDER_2          180     // Cylinder 3 fires at 180°
-#define FIRING_ORDER_3          360     // Cylinder 4 fires at 360°
-#define FIRING_ORDER_4          540     // Cylinder 2 fires at 540°
+// Firing order: 1-3-4-2 (common for inline 4 cylinder)
+// This defines TDC compression angle for each cylinder
+// Cylinder 1: TDC at 0° (and 720°)
+// Cylinder 3: TDC at 180°
+// Cylinder 4: TDC at 360°
+// Cylinder 2: TDC at 540°
+#define FIRING_ORDER_CYL1       0       // Cylinder 1 fires at 0°
+#define FIRING_ORDER_CYL3       180     // Cylinder 3 fires at 180°
+#define FIRING_ORDER_CYL4       360     // Cylinder 4 fires at 360°
+#define FIRING_ORDER_CYL2       540     // Cylinder 2 fires at 540°
 
 // ============================================================================
 // TRIGGER WHEEL CONFIGURATION
@@ -71,12 +76,15 @@
 #define INJECTOR_DEAD_TIME_VOLT 14.0f   // Reference voltage for dead time
 
 // Fuel properties (E27 Brazilian gasoline)
-#define STOICH_AFR              13.0f   // Stoichiometric AFR
+// Note: Stoichiometric AFR is defined in lambda.h as AFR_STOICH_E27 (13.0)
 #define FUEL_DENSITY_G_CC       0.755f  // Fuel density
 
 // Pulse width limits
 #define MIN_INJECTOR_PW_US      500     // Below this, don't inject
 #define MAX_INJECTOR_PW_US      25000   // Above this, cap (prevent hydrolock)
+
+// Injection timing (sequential mode)
+#define INJ_TIMING_BTDC         330     // Degrees BTDC to start injection (330° = during intake)
 
 // ============================================================================
 // IGNITION SYSTEM
@@ -107,17 +115,16 @@
 // SAFETY
 // ============================================================================
 
-// Sync loss timeout
-#define SYNC_LOSS_TIMEOUT_MS    100     // Emergency shutdown after this
+// Note: Sync loss timeout is defined in sync.h as SYNC_LOSS_TIMEOUT_US
 
 // TLE8888 watchdog
 #define TLE_WATCHDOG_PERIOD_MS  10      // Service watchdog every 10ms
 
-// Battery voltage limits
+// Battery voltage limits (for diagnostics)
 #define VBAT_MIN                9.0f    // Below this = warning
 #define VBAT_MAX                16.0f   // Above this = warning
 
-// Temperature limits
+// Temperature limits (for diagnostics)
 #define CLT_OVERHEAT            110.0f  // Coolant overheat warning (°C)
 
 // ============================================================================
@@ -136,12 +143,14 @@
 // PA10 = RX (connect to HC-05 TX)
 // VCC  = 3.3V or 5V (check module)
 // GND  = GND
-#define CAN_BAUD                500000  // 500 kbps
 
-// CAN message IDs
-#define CAN_ID_ECU_STATUS       0x100
-#define CAN_ID_SENSOR_DATA      0x101
-#define CAN_ID_FUEL_IGN         0x102
-#define CAN_ID_LAMBDA           0x103
+// ============================================================================
+// CAN BUS (Not yet implemented - reserved for future use)
+// ============================================================================
+// #define CAN_BAUD                500000  // 500 kbps
+// #define CAN_ID_ECU_STATUS       0x100
+// #define CAN_ID_SENSOR_DATA      0x101
+// #define CAN_ID_FUEL_IGN         0x102
+// #define CAN_ID_LAMBDA           0x103
 
 #endif // CONFIG_H

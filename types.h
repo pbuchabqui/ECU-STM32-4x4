@@ -93,38 +93,6 @@ typedef struct {
 #define ERR_EMERGENCY_SHUTDOWN  (1 << 15)
 
 // ============================================================================
-// CALIBRATION TABLE TYPES
-// ============================================================================
-
-// 2D table for lookups (e.g., VE, AFR, IGN)
-#define TABLE_SIZE_X    16
-#define TABLE_SIZE_Y    16
-
-typedef struct {
-    float values[TABLE_SIZE_X][TABLE_SIZE_Y];
-    float xBins[TABLE_SIZE_X];          // e.g., RPM
-    float yBins[TABLE_SIZE_Y];          // e.g., Load
-} Table2D;
-
-// 1D curve for simple lookups
-#define CURVE_SIZE      16
-
-typedef struct {
-    float values[CURVE_SIZE];
-    float xBins[CURVE_SIZE];
-} Curve1D;
-
-// ============================================================================
-// ANGLE TYPES (Fixed-point for precision)
-// ============================================================================
-
-// Q16.16 fixed-point for angles (0.000015° resolution)
-typedef int32_t angleQ16;
-
-#define ANGLE_TO_Q16(deg)   ((angleQ16)((deg) * 65536.0f))
-#define Q16_TO_ANGLE(q)     ((float)(q) / 65536.0f)
-
-// ============================================================================
 // TIME-SAFE MACROS
 // ============================================================================
 

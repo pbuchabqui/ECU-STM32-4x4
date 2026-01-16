@@ -81,11 +81,19 @@ uint32_t mafRecoveryTime = 0;
 #define MAF_MAX_VALID_HZ            12000.0f
 
 // ============================================================================
-// WIDEBAND O2 VIA CAN
+// WIDEBAND O2 CONFIGURATION
 // ============================================================================
 
+// Input source: 0 = CAN, 1 = Analog 0-5V
+#define WB_INPUT_SOURCE         0
+
+// CAN configuration (AEM X-Series, Innovate, etc.)
 #define WB_CAN_ID               0x180   // AEM X-Series default
 #define WB_CAN_TIMEOUT_MS       500
+
+// Analog configuration (for 0-5V wideband controllers)
+// Uses PIN_WBO2 (PA6) defined in pinout.h
+// Calibration is in lambda.h (WB_AFR_MIN, WB_AFR_MAX)
 
 volatile float canLambda = 1.0f;
 volatile uint32_t canLambdaTime = 0;
@@ -230,7 +238,11 @@ void processWidebandCAN(uint32_t id, uint8_t* data, uint8_t len) {
     }
 }
 
+// Read wideband lambda value
+// Returns lambda value (1.0 = stoichiometric)
 float readLambdaSensor(void) {
+#if WB_INPUT_SOURCE == 0
+    // CAN input
     noInterrupts();
     float lambda = canLambda;
     uint32_t age = millis() - canLambdaTime;
@@ -238,18 +250,32 @@ float readLambdaSensor(void) {
     interrupts();
     
     if (!valid || age > WB_CAN_TIMEOUT_MS) {
-        return 1.0f;  // Default to stoich
+        return 1.0f;  // Default to stoich if no valid CAN data
     }
     return lambda;
+#else
+    // Analog 0-5V input
+    // Read ADC and convert to lambda
+    float voltage = analogRead(PIN_WBO2) * (3.3f / 4096.0f) * (5.0f / 3.3f);  // Assuming 5V signal scaled to 3.3V
+    // Convert voltage to AFR using calibration from lambda.h
+    float afr = WB_AFR_MIN + (voltage / WB_VOLTAGE_MAX) * (WB_AFR_MAX - WB_AFR_MIN);
+    return afr / AFR_STOICH_DEFAULT;
+#endif
 }
 
 bool isLambdaSensorValid(void) {
+#if WB_INPUT_SOURCE == 0
+    // CAN input
     noInterrupts();
     uint32_t age = millis() - canLambdaTime;
     bool valid = canLambdaValid;
     interrupts();
-    
     return valid && (age < WB_CAN_TIMEOUT_MS);
+#else
+    // Analog input - check for valid voltage range
+    float voltage = analogRead(PIN_WBO2) * (3.3f / 4096.0f) * (5.0f / 3.3f);
+    return (voltage > 0.1f && voltage < 4.9f);
+#endif
 }
 
 // ============================================================================
@@ -425,8 +451,30 @@ uint32_t calculateDwell(void) {
 }
 
 // ============================================================================
-// EVENT SCHEDULING
+// EVENT SCHEDULING - SEQUENTIAL INJECTION AND IGNITION
 // ============================================================================
+
+// Firing order configuration (1-3-4-2 for most inline 4)
+// Maps schedule number to firing angle (TDC compression)
+// Schedule 1 = Cylinder 1 = fires at 0°
+// Schedule 2 = Cylinder 2 = fires at 540°  
+// Schedule 3 = Cylinder 3 = fires at 180°
+// Schedule 4 = Cylinder 4 = fires at 360°
+
+static const uint16_t cylinderFireAngle[4] = {
+    FIRING_ORDER_CYL1,  // Cylinder 1: TDC compression at 0°
+    FIRING_ORDER_CYL2,  // Cylinder 2: TDC compression at 540°
+    FIRING_ORDER_CYL3,  // Cylinder 3: TDC compression at 180°
+    FIRING_ORDER_CYL4   // Cylinder 4: TDC compression at 360°
+};
+
+// Calculate degrees until target angle
+static int16_t degreesUntil(int16_t currentAngle, int16_t targetAngle) {
+    int16_t delta = targetAngle - currentAngle;
+    if (delta < 0) delta += 720;
+    if (delta > 720) delta -= 720;
+    return delta;
+}
 
 void scheduleEvents(void) {
     if (!syncIsValid()) return;
@@ -464,46 +512,91 @@ void scheduleEvents(void) {
         }
     }
     
-    // Calculate timing from angle
+    // Get current angle and timing
     int16_t crankAngle = syncGetCrankAngle();
     uint32_t toothPeriod = syncStatus.avgToothPeriod;
     
     if (toothPeriod == 0) return;
     
-    // Time per degree
+    // Time per degree (µs/deg)
     float usPerDeg = toothPeriod / (float)DEGREES_PER_TOOTH;
     
-    // Schedule fuel and ignition for each cylinder
-    // Simplified: schedule based on current angle
-    // Full implementation would calculate exact timing for each cylinder
+    // =========================================================================
+    // SEQUENTIAL INJECTION SCHEDULING
+    // =========================================================================
+    // Inject at INJ_ANGLE_BTDC before each cylinder's TDC compression
     
     if (fuelPW > MIN_INJECTOR_PW_US) {
-        uint32_t fuelTimeout = 100;  // Immediate
+        // Calculate injection start angle for each cylinder
+        // Injection starts INJ_TIMING_BTDC before TDC
         
-        noInterrupts();
-        setFuelSchedule1(fuelTimeout, (uint32_t)fuelPW);
-        setFuelSchedule2(fuelTimeout, (uint32_t)fuelPW);
-        setFuelSchedule3(fuelTimeout, (uint32_t)fuelPW);
-        setFuelSchedule4(fuelTimeout, (uint32_t)fuelPW);
-        interrupts();
+        for (int cyl = 0; cyl < 4; cyl++) {
+            // Calculate target angle for injection start
+            int16_t injStartAngle = cylinderFireAngle[cyl] - INJ_TIMING_BTDC;
+            if (injStartAngle < 0) injStartAngle += 720;
+            
+            // Degrees until injection start
+            int16_t degsToInj = degreesUntil(crankAngle, injStartAngle);
+            
+            // Only schedule if event is upcoming (within next 720°)
+            // and not too close (> 10°)
+            if (degsToInj > 10 && degsToInj < 700) {
+                uint32_t injTimeout = (uint32_t)(degsToInj * usPerDeg);
+                
+                // Limit timeout to reasonable value
+                if (injTimeout < 50000) {  // Max 50ms
+                    noInterrupts();
+                    switch (cyl) {
+                        case 0: setFuelSchedule1(injTimeout, (uint32_t)fuelPW); break;
+                        case 1: setFuelSchedule2(injTimeout, (uint32_t)fuelPW); break;
+                        case 2: setFuelSchedule3(injTimeout, (uint32_t)fuelPW); break;
+                        case 3: setFuelSchedule4(injTimeout, (uint32_t)fuelPW); break;
+                    }
+                    interrupts();
+                }
+            }
+        }
     }
     
-    // Ignition scheduling
+    // =========================================================================
+    // SEQUENTIAL IGNITION SCHEDULING
+    // =========================================================================
+    // Dwell starts at (fireAngle - advance - dwellDegrees)
+    // Spark fires at (fireAngle - advance)
+    
     if (dwellTime > 0) {
-        // Calculate dwell start based on advance and current position
-        float degreesToFire = 360.0f - ignAdvance;
-        float degreesToDwellStart = degreesToFire - (dwellTime / usPerDeg);
+        // Convert dwell time to degrees
+        float dwellDegrees = dwellTime / usPerDeg;
         
-        if (degreesToDwellStart < 0) degreesToDwellStart += 360.0f;
-        
-        uint32_t ignTimeout = (uint32_t)(degreesToDwellStart * usPerDeg);
-        
-        noInterrupts();
-        setIgnitionSchedule1(ignTimeout, dwellTime);
-        setIgnitionSchedule2(ignTimeout, dwellTime);
-        setIgnitionSchedule3(ignTimeout, dwellTime);
-        setIgnitionSchedule4(ignTimeout, dwellTime);
-        interrupts();
+        for (int cyl = 0; cyl < 4; cyl++) {
+            // Spark fires at TDC minus advance
+            int16_t sparkAngle = cylinderFireAngle[cyl] - (int16_t)ignAdvance;
+            if (sparkAngle < 0) sparkAngle += 720;
+            
+            // Dwell starts before spark
+            int16_t dwellStartAngle = sparkAngle - (int16_t)dwellDegrees;
+            if (dwellStartAngle < 0) dwellStartAngle += 720;
+            
+            // Degrees until dwell start
+            int16_t degsToDwell = degreesUntil(crankAngle, dwellStartAngle);
+            
+            // Only schedule if event is upcoming
+            if (degsToDwell > 5 && degsToDwell < 700) {
+                uint32_t ignTimeout = (uint32_t)(degsToDwell * usPerDeg);
+                
+                // Limit timeout
+                if (ignTimeout < 100000) {  // Max 100ms
+                    noInterrupts();
+                    switch (cyl) {
+                        case 0: setIgnitionSchedule1(ignTimeout, dwellTime); break;
+                        case 1: setIgnitionSchedule2(ignTimeout, dwellTime); break;
+                        case 2: setIgnitionSchedule3(ignTimeout, dwellTime); break;
+                        case 3: setIgnitionSchedule4(ignTimeout, dwellTime); break;
+                    }
+                    interrupts();
+                }
+            }
+        }
     }
 }
 
@@ -607,6 +700,7 @@ void processSerialCommand(char c) {
         case 'D': tablesPrintDwell(); break;
         case 'C': tablesPrintCranking(); break;
         case 'M': tablesPrintMaf(); break;
+        case 'X': tle8888.printStatus(); break;  // TLE8888 status
         
         case 's':
             activeSerial->println(F("\nSaving calibration to EEPROM..."));
@@ -666,6 +760,7 @@ void processSerialCommand(char c) {
             activeSerial->println(F("O - Idle Status"));
             activeSerial->println(F("L - Lambda Status"));
             activeSerial->println(F("G - Autotune Status"));
+            activeSerial->println(F("X - TLE8888 Diagnostics"));
             activeSerial->println(F("D - Dwell Table"));
             activeSerial->println(F("C - Cranking Table"));
             activeSerial->println(F("M - MAF Table"));
@@ -894,14 +989,15 @@ void loop() {
     // Lambda control 20Hz
     if (TIME_ELAPSED(lastLambda, 50)) {
         lastLambda = millis();
-        float lv = readLambdaSensor();
+        float lambdaValue = readLambdaSensor();  // Returns lambda (1.0 = stoich)
         uint16_t rpm = syncGetRPM();
         
-        lambdaUpdate(lv * 5.0f,  // Convert lambda to pseudo-voltage for compatibility
-                     rpm, 
-                     sensorData.tpsPercent,
-                     sensorData.cltCelsius, 
-                     sensorData.loadMgStroke);
+        // Use lambdaUpdateDirect for CAN input (receives lambda directly)
+        lambdaUpdateDirect(lambdaValue,
+                           rpm, 
+                           sensorData.tpsPercent,
+                           sensorData.cltCelsius, 
+                           sensorData.loadMgStroke);
         
         // Autotune learning (10Hz, runs every other lambda update)
         static bool autotuneToggle = false;

@@ -1,20 +1,21 @@
 /*
- * lambda.cpp - Lambda (O2) Closed-Loop Control Implementation
+ * lambda.cpp - Wideband Lambda Closed-Loop Control
  * ECU STM32F405 v8.2
  * 
- * AFR target table moved to tables.cpp
- * This module handles only the PID control logic.
+ * Supports WIDEBAND sensors only:
+ * - 0-5V linear output
+ * - CAN-based controllers
  * 
  * Theory of Operation:
- * 1. Read wideband O2 sensor voltage (or CAN)
+ * 1. Read wideband O2 sensor (0-5V analog or CAN)
  * 2. Convert to AFR/Lambda
- * 3. Compare to target from AFR table (via tables.h)
+ * 3. Compare to target from AFR table
  * 4. PID calculates fuel correction
  * 5. Correction applied to fuel pulse width
  */
 
 #include "lambda.h"
-#include "tables.h"  // AFR target table is here now
+#include "tables.h"
 #include <math.h>
 
 // ============================================================================
@@ -32,36 +33,36 @@ void lambdaInit(void) {
     
     lambdaControl.state = LAMBDA_STATE_DISABLED;
     lambdaControl.isEnabled = true;
-    lambdaControl.autoCorrectEnabled = true;  // Auto-correction ON by default
+    lambdaControl.autoCorrectEnabled = true;
     lambdaControl.warmupStartTime = millis();
     lambdaControl.lastUpdateTime = millis();
 }
 
 // ============================================================================
-// SENSOR READING
+// WIDEBAND SENSOR CONVERSION
 // ============================================================================
 
+// Convert 0-5V to AFR (linear interpolation)
 static float voltageToAfr(float voltage) {
-#if LAMBDA_SENSOR_TYPE == LAMBDA_SENSOR_WIDEBAND
+    // Clamp voltage to valid range
+    voltage = constrain(voltage, WB_VOLTAGE_MIN, WB_VOLTAGE_MAX);
+    
+    // Linear interpolation: AFR = AFR_MIN + (V / V_MAX) * (AFR_MAX - AFR_MIN)
     float afr = WB_AFR_MIN + (voltage / WB_VOLTAGE_MAX) * (WB_AFR_MAX - WB_AFR_MIN);
-    return constrain(afr, WB_AFR_MIN, WB_AFR_MAX);
-#else
-    if (voltage > NB_RICH_THRESHOLD) {
-        return AFR_STOICH_DEFAULT * 0.95f;
-    } else if (voltage < NB_LEAN_THRESHOLD) {
-        return AFR_STOICH_DEFAULT * 1.05f;
-    } else {
-        return AFR_STOICH_DEFAULT;
-    }
-#endif
+    
+    return afr;
+}
+
+// Convert lambda directly to AFR
+static float lambdaToAfr(float lambda) {
+    return lambda * AFR_STOICH_DEFAULT;
 }
 
 // ============================================================================
-// AFR TARGET (Now delegates to tables.h)
+// AFR TARGET (delegates to tables.h)
 // ============================================================================
 
 float lambdaGetTargetAfr(uint16_t rpm, float loadMgStroke) {
-    // v8.2: Use centralized table from tables.cpp
     return getAfrTarget((float)rpm, loadMgStroke);
 }
 
@@ -73,13 +74,14 @@ static float calculatePID(float error, uint32_t dtMs) {
     float dt = dtMs / 1000.0f;
     if (dt <= 0 || dt > 1.0f) dt = 0.02f;
     
-    // Deadband
+    // Deadband - no correction for small errors
     if (fabsf(error) < LAMBDA_DEADBAND) {
         lambdaControl.proportional = 0;
         lambdaControl.derivative = 0;
         return lambdaControl.integral;
     }
     
+    // Scale error for better PID response
     float scaledError = error * 10.0f;
     
     // Proportional
@@ -96,6 +98,7 @@ static float calculatePID(float error, uint32_t dtMs) {
     lambdaControl.derivative = LAMBDA_PID_KD * dError * 10.0f;
     lambdaControl.lastError = error;
     
+    // Sum PID terms
     float output = lambdaControl.proportional + 
                    lambdaControl.integral + 
                    lambdaControl.derivative;
@@ -110,17 +113,20 @@ static float calculatePID(float error, uint32_t dtMs) {
 }
 
 // ============================================================================
-// MAIN UPDATE
+// CORE UPDATE LOGIC
 // ============================================================================
 
-void lambdaUpdate(float sensorVoltage, uint16_t rpm, float tps, float clt, float loadMgStroke) {
+static void lambdaUpdateInternal(float afr, uint16_t rpm, float tps, float clt, float loadMgStroke) {
     uint32_t now = millis();
     uint32_t dtMs = now - lambdaControl.lastUpdateTime;
     
+    // Rate limit updates
     if (dtMs < LAMBDA_UPDATE_INTERVAL_MS) return;
     lambdaControl.lastUpdateTime = now;
     
-    lambdaControl.sensorVoltage = sensorVoltage;
+    // Store AFR and calculate lambda
+    lambdaControl.afr = afr;
+    lambdaControl.lambda = afr / AFR_STOICH_DEFAULT;
     
     // Check if enabled
     if (!lambdaControl.isEnabled) {
@@ -129,8 +135,8 @@ void lambdaUpdate(float sensorVoltage, uint16_t rpm, float tps, float clt, float
         return;
     }
     
-    // Validate sensor
-    if (sensorVoltage < LAMBDA_WARMUP_VOLTAGE_MIN || sensorVoltage > 5.1f) {
+    // Validate sensor (check for reasonable AFR range)
+    if (afr < WB_AFR_MIN || afr > WB_AFR_MAX) {
         lambdaControl.sensorValid = false;
         if (lambdaControl.state == LAMBDA_STATE_CLOSED_LOOP) {
             lambdaControl.state = LAMBDA_STATE_ERROR;
@@ -139,7 +145,7 @@ void lambdaUpdate(float sensorVoltage, uint16_t rpm, float tps, float clt, float
         lambdaControl.sensorValid = true;
     }
     
-    // Sensor warmup
+    // Sensor warmup period
     uint32_t warmupElapsed = now - lambdaControl.warmupStartTime;
     if (warmupElapsed < LAMBDA_WARMUP_TIME_MS) {
         lambdaControl.state = LAMBDA_STATE_WARMUP;
@@ -149,11 +155,7 @@ void lambdaUpdate(float sensorVoltage, uint16_t rpm, float tps, float clt, float
     }
     lambdaControl.isWarmedUp = true;
     
-    // Convert to AFR/Lambda
-    lambdaControl.afr = voltageToAfr(sensorVoltage);
-    lambdaControl.lambda = lambdaControl.afr / AFR_STOICH_DEFAULT;
-    
-    // Running average
+    // Running average lambda
     lambdaControl.avgLambda = lambdaControl.avgLambda * 0.95f +
                                lambdaControl.lambda * 0.05f;
     
@@ -167,20 +169,21 @@ void lambdaUpdate(float sensorVoltage, uint16_t rpm, float tps, float clt, float
     
     if (!conditionsMet) {
         lambdaControl.state = LAMBDA_STATE_OPEN_LOOP;
+        // Decay correction and integral slowly
         lambdaControl.correction *= 0.95f;
         lambdaControl.integral *= 0.98f;
         return;
     }
     
-    // CLOSED LOOP
+    // CLOSED LOOP OPERATION
     lambdaControl.state = LAMBDA_STATE_CLOSED_LOOP;
     lambdaControl.closedLoopTime += dtMs;
     
-    // Get target from centralized table
+    // Get target from AFR table
     lambdaControl.targetAfr = lambdaGetTargetAfr(rpm, loadMgStroke);
     lambdaControl.targetLambda = lambdaControl.targetAfr / AFR_STOICH_DEFAULT;
     
-    // Calculate error (always, for diagnostics)
+    // Calculate error (positive = too lean, negative = too rich)
     lambdaControl.lambdaError = lambdaControl.targetLambda - lambdaControl.lambda;
     
     // Only update correction if auto-correct is enabled
@@ -193,11 +196,28 @@ void lambdaUpdate(float sensorVoltage, uint16_t rpm, float tps, float clt, float
                                               LAMBDA_CORRECTION_MIN,
                                               LAMBDA_CORRECTION_MAX);
         
-        // Update average
+        // Update running average
         lambdaControl.avgCorrection = lambdaControl.avgCorrection * 0.99f +
                                        lambdaControl.correction * 0.01f;
     }
-    // When autoCorrectEnabled is false, correction stays frozen at last value
+    // When autoCorrectEnabled is false, correction stays frozen
+}
+
+// ============================================================================
+// PUBLIC UPDATE FUNCTIONS
+// ============================================================================
+
+void lambdaUpdate(float sensorVoltage, uint16_t rpm, float tps, float clt, float loadMgStroke) {
+    lambdaControl.sensorVoltage = sensorVoltage;
+    float afr = voltageToAfr(sensorVoltage);
+    lambdaUpdateInternal(afr, rpm, tps, clt, loadMgStroke);
+}
+
+void lambdaUpdateDirect(float lambdaValue, uint16_t rpm, float tps, float clt, float loadMgStroke) {
+    // Convert lambda to pseudo-voltage for diagnostics
+    lambdaControl.sensorVoltage = (lambdaValue - 0.5f) * (5.0f / 1.0f);
+    float afr = lambdaToAfr(lambdaValue);
+    lambdaUpdateInternal(afr, rpm, tps, clt, loadMgStroke);
 }
 
 // ============================================================================
@@ -216,27 +236,9 @@ bool lambdaIsClosedLoop(void) {
     return lambdaControl.state == LAMBDA_STATE_CLOSED_LOOP;
 }
 
-float lambdaGetAfr(void) {
-    return lambdaControl.afr;
-}
-
-float lambdaGetLambda(void) {
-    return lambdaControl.lambda;
-}
-
 // ============================================================================
 // CONTROL
 // ============================================================================
-
-void lambdaEnable(void) {
-    lambdaControl.isEnabled = true;
-}
-
-void lambdaDisable(void) {
-    lambdaControl.isEnabled = false;
-    lambdaControl.state = LAMBDA_STATE_DISABLED;
-    lambdaControl.correction = 0;
-}
 
 void lambdaReset(void) {
     lambdaControl.integral = 0;
@@ -250,8 +252,6 @@ void lambdaReset(void) {
 void lambdaSetAutoCorrect(bool enabled) {
     lambdaControl.autoCorrectEnabled = enabled;
     if (!enabled) {
-        // When disabling, keep correction at current value (freeze)
-        // This allows seeing the "learned" correction
         Serial.print(F("Lambda Auto-Correct: OFF (frozen at "));
         Serial.print(lambdaControl.correction, 1);
         Serial.println(F("%)"));
@@ -281,16 +281,18 @@ void lambdaPrintStatus(void) {
     }
     
     Serial.print(F("Enabled: ")); Serial.println(lambdaControl.isEnabled ? "YES" : "NO");
-    Serial.print(F("Auto-Correct: ")); Serial.println(lambdaControl.autoCorrectEnabled ? "ON" : "OFF (frozen)");
+    Serial.print(F("Auto-Correct: ")); Serial.println(lambdaControl.autoCorrectEnabled ? "ON" : "OFF");
     Serial.print(F("Sensor Valid: ")); Serial.println(lambdaControl.sensorValid ? "YES" : "NO");
     
     Serial.println(F("--- Readings ---"));
     Serial.print(F("Voltage: ")); Serial.print(lambdaControl.sensorVoltage, 2); Serial.println(F(" V"));
     Serial.print(F("AFR: ")); Serial.println(lambdaControl.afr, 1);
     Serial.print(F("Lambda: ")); Serial.println(lambdaControl.lambda, 3);
+    Serial.print(F("Avg Lambda: ")); Serial.println(lambdaControl.avgLambda, 3);
     
     Serial.println(F("--- Target ---"));
     Serial.print(F("Target AFR: ")); Serial.println(lambdaControl.targetAfr, 1);
+    Serial.print(F("Target Lambda: ")); Serial.println(lambdaControl.targetLambda, 3);
     Serial.print(F("Error: ")); Serial.println(lambdaControl.lambdaError, 3);
     
     Serial.println(F("--- PID ---"));
@@ -300,6 +302,9 @@ void lambdaPrintStatus(void) {
     
     Serial.println(F("--- Output ---"));
     Serial.print(F("Correction: ")); Serial.print(lambdaControl.correction, 1); Serial.println(F("%"));
+    Serial.print(F("Avg Correction: ")); Serial.print(lambdaControl.avgCorrection, 1); Serial.println(F("%"));
+    
+    Serial.print(F("Closed Loop Time: ")); Serial.print(lambdaControl.closedLoopTime / 1000); Serial.println(F(" s"));
     
     Serial.println(F("=========================\n"));
 }

@@ -17,7 +17,7 @@
 #define PIN_IAT         PA2     // Intake Air Temperature (NTC)
 #define PIN_MAP         PA3     // Manifold Absolute Pressure (optional)
 #define PIN_VBAT        PA4     // Battery Voltage (via divider)
-#define PIN_O2          PA5     // Narrowband O2 (backup)
+#define PIN_WBO2        PA6     // Wideband O2 analog 0-5V (optional, if not using CAN)
 
 // ============================================================================
 // FREQUENCY INPUTS

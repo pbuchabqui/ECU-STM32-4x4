@@ -1,5 +1,55 @@
 # ECU STM32F405 + TLE8888 - Changelog
 
+## v8.2.2 - Sequential Injection/Ignition + Code Cleanup (2026-01-16)
+
+### Sequential Operation
+- **Injeção sequencial**: Cada cilindro é injetado individualmente no ângulo correto
+- **Ignição sequencial**: Dwell e spark calculados para cada cilindro
+- **Firing order**: 1-3-4-2 (configurável em config.h)
+- **Timing**: Injeção 330° BTDC (durante admissão)
+
+### TLE8888 Driver Simplificado
+- Reescrito para usar SPI padrão (16-bit frames)
+- Removido código complexo de acesso direto a registros
+- API simplificada: begin(), setOutput(), setIgnition()
+- Diagnóstico via comando 'X'
+
+### Lambda/Wideband Simplificado
+- **Removido suporte a narrowband** (sonda de 1 fio)
+- **Mantido apenas wideband**:
+  - CAN: AEM X-Series, Innovate, etc. (via WB_CAN_ID)
+  - Analógico: 0-5V linear (via PIN_WBO2)
+- Seleção de fonte via `WB_INPUT_SOURCE` (0=CAN, 1=Analog)
+- Nova função `lambdaUpdateDirect()` para entrada CAN
+- Removidas funções não usadas: lambdaEnable/Disable/GetAfr/GetLambda
+
+### Code Cleanup
+**Removido de types.h:**
+- Table2D, Curve1D structs (não usados, tables.h tem suas próprias)
+- TABLE_SIZE_X, TABLE_SIZE_Y, CURVE_SIZE defines
+- angleQ16 tipo e macros (ANGLE_TO_Q16, Q16_TO_ANGLE)
+
+**Removido de config.h:**
+- STOICH_AFR (duplicado com AFR_STOICH_E27 em lambda.h)
+- SYNC_LOSS_TIMEOUT_MS (usa SYNC_LOSS_TIMEOUT_US em sync.h)
+- CAN defines comentados (não implementado ainda)
+
+**Removido de tables.cpp/h:**
+- currentCalMode variável global (não utilizada, calState.mode é usado)
+
+**Removido de lambda.h/cpp:**
+- Suporte a LAMBDA_SENSOR_NARROWBAND
+- Defines NB_RICH_THRESHOLD, NB_LEAN_THRESHOLD
+- Código #if/#else para conversão narrowband
+- Funções lambdaEnable(), lambdaDisable(), lambdaGetAfr(), lambdaGetLambda()
+
+**Atualizado pinout.h:**
+- PIN_O2 (PA5) → PIN_WBO2 (PA6) - corrigido conflito com SPI_SCK
+
+**Total:** ~50 linhas de código morto removidas
+
+---
+
 ## v8.2.1 - Autotune System + Bluetooth (2026-01-09)
 
 ### Major Additions

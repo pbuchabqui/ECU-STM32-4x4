@@ -161,8 +161,6 @@ typedef enum {
     CAL_MODE_MAF
 } CalibrationMode;
 
-extern CalibrationMode currentCalMode;
-
 // ============================================================================
 // INITIALIZATION
 // ============================================================================

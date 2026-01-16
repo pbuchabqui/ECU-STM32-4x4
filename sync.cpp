@@ -188,7 +188,16 @@ void syncProcessTooth(uint32_t toothTime) {
                     // Good gap - reset counters
                     syncStatus.toothCount = 1;
                     syncStatus.teethSinceGap = 0;
-                    syncStatus.crankAngle = TRIGGER_ANGLE_BTDC;
+                    
+                    // Reset angle, preserving 720° phase
+                    // If we have cam sync and were in second half (360-719°),
+                    // stay in second half
+                    if (syncStatus.camSyncAcquired && syncStatus.crankAngle >= 360) {
+                        syncStatus.crankAngle = TRIGGER_ANGLE_BTDC + 360;
+                    } else {
+                        syncStatus.crankAngle = TRIGGER_ANGLE_BTDC;
+                    }
+                    
                     syncStatus.badToothCount = 0;
                     
                 } else if (syncStatus.teethSinceGap < syncStatus.expectedTeeth - 2 ||

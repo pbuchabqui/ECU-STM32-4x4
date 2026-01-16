@@ -34,9 +34,6 @@ IdleRpmTable idleRpmTable;
 // Calibration Data (Tunable)
 CalibrationData calData;
 
-// Current calibration mode
-CalibrationMode currentCalMode = CAL_MODE_VE;
-
 // ============================================================================
 // STATIC STATE VARIABLES
 // ============================================================================
